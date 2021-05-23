@@ -1,0 +1,551 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml">
+    <head>
+        <meta http-equiv="Content-Type" content="text/html; charset=utf-8"/>
+        <title>Graph Editor</title>
+        <style>
+            html, body {
+                overflow: hidden;
+                width: 100%;
+                height: 100%;
+                margin: 0;
+                padding: 0;
+            }
+                    #holder {
+                width: 80%;
+                height: 100%;
+                float: left;
+            }
+            #control_panel {
+            	width: 20%;
+            	height: 100%;
+            	float: right;
+            }
+            #renderCanvas {
+                width: 100%;
+                height: 100%;
+                touch-action: none;
+            }
+        </style>
+        <script src="https://cdn.babylonjs.com/babylon.js"></script>
+        <script src="https://cdn.babylonjs.com/loaders/babylonjs.loaders.min.js"></script>
+        <script src="https://cdn.babylonjs.com/gui/babylon.gui.min.js"></script>
+        <script src="https://code.jquery.com/pep/0.4.3/pep.js"></script>
+    </head>
+   <body>
+    <div id = "holder">
+            <canvas id="renderCanvas" touch-action="none"></canvas> <!-- touch-action="none" for best results from PEP -->
+    </div>
+    <a id="downloader" hidden="true" href=""></a>
+    <input type="file" id="upload_graph" name="upload_graph" accept=".xml" hidden="true">
+    <div id="control_panel">
+    	<button onclick="download(formGraphXML(), 'graph.xml')">Save graph</button>
+	  	<br>
+	  	<button onclick="document.getElementById('upload_graph').click()">Load file</button>
+	  	<br>
+	  	<div id="edge_settings" style="display: none">
+	  		<label for="input_weight"> weight </label>
+	  		<input type="text" name="weight" id="input_weight">
+		  	<br>
+		  	<label for="input_initial_points"> initial points </label>
+		  	<input type="text" name="initial_points" id="input_initial_points">
+		  	<br>
+		  	<button onclick="setEdgeProperties()">Set edge properties</button>
+	  	</div>
+    </div>
+    <script>
+    	var graphNodes = [];
+    	var graphEdges = [];
+    	var moveSpeed = 0.1;
+    	var maxMoveSpeed = 1;
+    	var movementMode = "rail";
+    	var keyPressIsOnCooldown = false;
+    	var grid = [];
+    	var global_scene = null;
+    	var global_camera = null;
+        var advancedTexture = null;
+        var label_array = [];
+        var are_weights_shown = false;
+
+    	var nodeMat = null;
+    	var selectedNodeMat = null;
+    	var selectedNode = null;
+    	var selectedEdge = null;
+    	var futureEdgeLength = 1;
+
+    	var filterArray = function(array, filter, destructor) {
+    		var src_ptr = 0;
+    		var dst_ptr = 0;
+    		while (src_ptr < array.length) {
+    			if (filter(array[src_ptr])) {
+    				array[dst_ptr] = array[src_ptr];
+    				dst_ptr++;
+    			} else {
+    				destructor(array[src_ptr]);
+    			}
+    			src_ptr++;
+    		}
+    		array.length = dst_ptr;
+    	};
+
+	    function download(text, name) {
+			var downloader = document.getElementById("downloader");
+			var file = new Blob([text], {type: 'text/plain'});
+			downloader.href = URL.createObjectURL(file);
+			downloader.download = name;
+			downloader.click();
+	    };
+
+	    function uploadGraph() {
+	    	if (this.files.length == 1) {
+	    		var reader = new FileReader();
+				reader.onload = function() {
+					//window.alert(reader.result);
+					resetAll(global_scene, global_camera);
+					var parser = new DOMParser();
+					var uploaded_xml = parser.parseFromString(reader.result, "text/xml");
+					var node_list = uploaded_xml.getElementsByTagName("node");
+					for (i = 0; i < node_list.length; i++) {
+						var cur_node = node_list[i];
+						var graph_node = BABYLON.MeshBuilder.CreateSphere("sphere", {});
+						graph_node.position.x = parseInt(cur_node.getAttribute("x"));
+						graph_node.position.y = parseInt(cur_node.getAttribute("y"));
+						graph_node.position.z = parseInt(cur_node.getAttribute("z"));
+						graph_node.scaling.x = 0.4;
+						graph_node.scaling.y = 0.4;
+						graph_node.scaling.z = 0.4;
+						graph_node.material = nodeMat;
+						graph_node.node_data = { id: parseInt(cur_node.getAttribute("id")) };
+						graphNodes.push(graph_node);
+					}
+					var edge_list = uploaded_xml.getElementsByTagName("edge");
+					for (i = 0; i < edge_list.length; i++) {
+						var cur_edge = edge_list[i];
+						var cur_source_id = cur_edge.getAttribute("source");
+						var cur_source = graphNodes.find(function(item, index, array) {
+							return item.node_data.id == cur_source_id;
+						});
+						var cur_target_id = cur_edge.getAttribute("target");
+						var cur_target = graphNodes.find(function(item, index, array) {
+							return item.node_data.id == cur_target_id;
+						});
+						var edge_path = [cur_target.position, cur_source.position];
+	    				futureEdgeLength = BABYLON.Vector3.Distance(cur_target.position, cur_source.position);
+	    				var graph_edge = BABYLON.MeshBuilder.CreateTube("tube", {path: edge_path, radius: 0.1, radiusFunction: radiusChange, sideOrientation: BABYLON.Mesh.DOUBLESIDE});
+						graph_edge.material = nodeMat;
+						graph_edge.edge_data = { id: cur_edge.getAttribute("id"), source: cur_source_id, target: cur_target_id, weight: cur_edge.getAttribute("weight"), initial_points: cur_edge.getAttribute("upText") };
+						graphEdges.push(graph_edge);
+					}
+					next_node_id = node_list.length + 1;
+					next_edge_id = edge_list.length + 1;
+				}
+				reader.readAsText(this.files[0]);
+	    	}
+	    }
+
+	    var file_upload_input = document.getElementById("upload_graph");
+    	file_upload_input.addEventListener("change", uploadGraph);
+
+    	var clearGrid = function(scene, camera) {
+    		grid.forEach(function(grid_shpere, index, array) {
+    			grid_shpere.dispose();
+    		});
+    		grid.splice(0, grid.length);
+    	};
+
+    	var makeGrid = function(scene, camera) {
+    		for (dx = -1; dx <= 1; dx++) {
+    			for (dy = -1; dy <= 1; dy++) {
+    				for (dz = -1; dz <= 1; dz++) {
+    					var grid_shpere = BABYLON.MeshBuilder.CreateSphere("sphere", {});
+    					grid_shpere.position.x = camera.position.x + dx;
+    					grid_shpere.position.y = camera.position.y + dy;
+    					grid_shpere.position.z = camera.position.z + dz;
+    					grid_shpere.scaling.x = 0.3;
+    					grid_shpere.scaling.y = 0.3;
+    					grid_shpere.scaling.z = 0.3;
+    					grid_shpere.grid_data = {};
+    					grid.push(grid_shpere);
+    				}
+    			}
+    		}
+    	};
+
+    	var unselectNode = function() {
+    		if (selectedNode !== null) {
+    			selectedNode.material = nodeMat;
+    			selectedNode = null;
+    		}
+    	};
+
+    	var unselectEdge = function() {
+    		if (selectedEdge !== null) {
+    			selectedEdge.material = nodeMat;
+    			selectedEdge = null;
+    			document.getElementById("edge_settings").style.display = "none";
+    		}
+    	}
+
+    	var delEdge = function(edge_id) {
+    		var edge_index = graphEdges.findIndex(function(item, index, array) {
+    			if (item.edge_data === undefined) {
+    				return false
+    			} else {
+    				return item.edge_data.id == edge_id;
+    			}
+    		});
+    		if (edge_index != -1) {
+    			graphEdges[edge_index].dispose();
+    			graphEdges.splice(edge_index, 1);
+    		}
+    	};
+
+    	var delNode = function(node_id) {
+    		var node_index = graphNodes.findIndex(function(item, index, array) {
+    			if (item.node_data === undefined) {
+    				return false
+    			} else {
+    				return item.node_data.id == node_id;
+    			}
+    		});
+    		if (node_index != -1) {
+    			filterArray(graphEdges, function(edge) {
+    				return (edge.edge_data.source != node_id) && (edge.edge_data.target != node_id);
+    			}, function(edge) {
+    				edge.dispose();
+    			});
+    			graphNodes[node_index].dispose();
+    			graphNodes.splice(node_index, 1);
+    		}
+    	};
+
+    	var resetAll = function(scene, camera) {
+    		camera.position.x = 0;
+    		camera.position.y = 5;
+    		camera.position.z = 0;
+    		camera.rotation.x = Math.PI / 2;
+    		camera.rotation.y = 0;
+    		graphEdges.forEach(function(item, index, array) {
+    			item.dispose();
+    		});
+    		graphEdges.length = 0;
+    		graphNodes.forEach(function(item, index, array) {
+    			item.dispose();
+    		});
+    		graphNodes.length = 0;
+    		clearGrid();
+    	};
+
+    	var setEdgeProperties = function() {
+    		if (selectedEdge !== null) {
+    			selectedEdge.edge_data.weight = document.getElementById("input_weight").value;
+	    		selectedEdge.edge_data.initial_points = document.getElementById("input_initial_points").value;
+	    		document.getElementById("edge_settings").style.display = "none";
+	    		selectedEdge.material = nodeMat;
+	    		selectedEdge = null;
+    		}
+    	};
+
+    	var formGraphXML = function() {
+    		var result = "<graphml><graph>";
+    		graphNodes.forEach(function(item, index, array) {
+    			result += '<node id="' + item.node_data.id + '" x="' + item.position.x + '" y="' + item.position.y + '" z="' + item.position.z + '" ></node>';
+    		});
+    		graphEdges.forEach(function(item, index, array) {
+    			result += '<edge id="' + item.edge_data.id + '" source="' + item.edge_data.source + '" target="' + item.edge_data.target + '" weight="' + (item.edge_data.weight || 1) + '" upText="' + (item.edge_data.initial_points || '') + '" ></edge>';
+    		});
+    		result += "</graph></graphml>";
+    		return result;
+    	};
+
+    	var next_node_id = 0;
+    	var genNodeId = function() {
+    		return next_node_id++;
+    	};
+    	var next_edge_id = 10000;
+    	var genEdgeId = function() {
+    		return next_edge_id++;
+    	};
+
+    	var radiusChange = (index, distance) => {
+	        const radius =  (distance / futureEdgeLength) * 0.1;
+	        return radius;
+	    };
+
+    	const pointerDown = (mesh) => {
+    		if (mesh.grid_data !== undefined) {
+    			var graph_node = BABYLON.MeshBuilder.CreateSphere("sphere", {});
+				graph_node.position.x = mesh.position.x;
+				graph_node.position.y = mesh.position.y;
+				graph_node.position.z = mesh.position.z;
+				graph_node.scaling.x = 0.4;
+				graph_node.scaling.y = 0.4;
+				graph_node.scaling.z = 0.4;
+				graph_node.material = nodeMat;
+				graph_node.node_data = { id: genNodeId() };
+				graphNodes.push(graph_node);
+    		} else if (mesh.node_data !== undefined) {
+    			if (selectedNode === null) {
+    				selectedNode = mesh;
+    				mesh.material = selectedNodeMat;
+    			} else if (mesh.node_data.id != selectedNode.node_data.id) {
+    				var edge_path = [mesh.position, selectedNode.position];
+    				futureEdgeLength = BABYLON.Vector3.Distance(mesh.position, selectedNode.position);
+    				var graph_edge = BABYLON.MeshBuilder.CreateTube("tube", {path: edge_path, radius: 0.1, radiusFunction: radiusChange, sideOrientation: BABYLON.Mesh.DOUBLESIDE});
+					graph_edge.material = nodeMat;
+					graph_edge.edge_data = { id: genEdgeId(), source: selectedNode.node_data.id, target: mesh.node_data.id };
+					graphEdges.push(graph_edge);
+					unselectNode();
+    			}
+    		} else if (mesh.edge_data !== undefined) {
+    			unselectNode();
+    			if (selectedEdge !== null) {
+    				selectedEdge.material = nodeMat;
+    				selectedEdge = null;
+    			}
+    			selectedEdge = mesh;
+    			mesh.material = selectedNodeMat;
+    			document.getElementById("input_weight").value = mesh.edge_data.weight || 1;
+    			document.getElementById("input_initial_points").value = mesh.edge_data.initial_points || "";
+    			document.getElementById("edge_settings").style.display = "block";
+    		}
+		}
+
+    	var initializeInput = function (scene, camera) {
+		    let dsm = new BABYLON.DeviceSourceManager(scene.getEngine());
+
+		    dsm.onDeviceConnectedObservable.add((device) => {
+		        // KEYBOARD CONFIG
+		        if (device.deviceType === BABYLON.DeviceType.Keyboard) {
+		            scene.onBeforeRenderObservable.add(() => {
+		                let transformMatrix = BABYLON.Matrix.Zero();
+		                let moveDirection = BABYLON.Vector3.Zero();
+		                let localDirection = BABYLON.Vector3.Zero();
+		                let transformedDirection = BABYLON.Vector3.Zero();
+		                let isMoving = false;
+
+		                // unselect
+                        if (device.getInput(27) === 1) { // escape
+                        	unselectNode();
+                        	unselectEdge();
+                        }
+
+		                if (movementMode == "swim" && selectedEdge === null) {
+		                	// WASD will move and strafe
+			                if (device.getInput(65) === 1) { // a
+			                    localDirection.x = -0.1;
+			                    isMoving = true;
+			                }
+			                if (device.getInput(68) === 1) { // d
+			                    localDirection.x = 0.1;
+			                    isMoving = true;
+			                }
+
+			                if (device.getInput(87) === 1) { // w
+			                    localDirection.z = 0.1;
+			                    isMoving = true;
+			                }
+			                if (device.getInput(83) === 1) { // s
+			                    localDirection.z = -0.1;
+			                    isMoving = true;
+			                }
+		                }
+
+		                if (movementMode == "rail" && selectedEdge === null) {
+		                	// w and e - x axis control
+	                        if (device.getInput(87) === 1) { // w
+	                            moveDirection.x = -moveSpeed;
+	                            isMoving = true;
+	                        }
+	                        if (device.getInput(69) === 1) { // e
+	                            moveDirection.x = moveSpeed;
+	                            isMoving = true;
+	                        }
+	                        // s and d - y axis control
+	                        if (device.getInput(83) === 1) { // s
+	                            moveDirection.y = -moveSpeed;
+	                            isMoving = true;
+	                        }
+	                        if (device.getInput(68) === 1) { // d
+	                            moveDirection.y = moveSpeed;
+	                            isMoving = true;
+	                        }
+	                        // x and c - z axis control
+	                        if (device.getInput(88) === 1) { // x
+	                            moveDirection.z = -moveSpeed;
+	                            isMoving = true;
+	                        }
+	                        if (device.getInput(67) === 1) { // c
+	                            moveDirection.z = moveSpeed;
+	                            isMoving = true;
+	                        }
+		                }
+                        // grid control
+                        if (device.getInput(71) === 1) { // g
+                        	makeGrid(scene, camera);
+                        }
+                        if (device.getInput(72) === 1) { // h
+                        	clearGrid(scene, camera);
+                        }
+                        if (device.getInput(89) === 1) { // y
+                            if (keyPressIsOnCooldown === false) {
+                                if (are_weights_shown) {
+                                    are_weights_shown = false;
+                                    label_array.forEach(function(obj, index, array) {
+                                        obj.dispose();
+                                    });
+                                    label_array.splice(0, label_array.length);
+                                    advancedTexture.dispose();
+                                } else {
+                                    are_weights_shown = true;
+                                    advancedTexture = BABYLON.GUI.AdvancedDynamicTexture.CreateFullscreenUI("UI");
+                                    graphEdges.forEach(function(obj, index, array) {
+                                        var label = new BABYLON.GUI.TextBlock();
+                                        label.text = obj.edge_data.weight;
+                                        advancedTexture.addControl(label);
+                                        label.linkWithMesh(obj);
+                                        label.linkOffsetY = -35;
+                                        label.linkOffsetX = -10;
+                                        label.color = "magenta";
+                                        label_array.push(label);
+                                    });
+                                }
+                                keyPressIsOnCooldown = true;
+                                setTimeout(function() {
+                                    keyPressIsOnCooldown = false;
+                                }, 500);
+                            }
+                        }
+                        // delete node
+                        if (device.getInput(46) === 1) { // delete
+                        	if (selectedNode !== null) {
+                        		delNode(selectedNode.node_data.id);
+                        		selectedNode = null;
+                        	} else if (selectedEdge !== null) {
+                        		delEdge(selectedEdge.edge_data.id);
+                        		selectedEdge = null;
+                        		document.getElementById("edge_settings").style.display = "none";
+                        	}
+                        }
+
+                        if (selectedEdge === null) {
+                        	// movement speed control
+	                        if (device.getInput(79) === 1) { // o
+	                        	if (moveSpeed > 0.05) {
+	                        		moveSpeed -= 0.01;
+	                        	}
+	                        }
+	                        if (device.getInput(80) === 1) { // p
+	                        	if (moveSpeed < maxMoveSpeed) {
+	                        		moveSpeed += 0.01;
+	                        	}
+	                        }
+	                        // movement mode control
+	                        if (device.getInput(77) === 1) { // m
+	                        	if (keyPressIsOnCooldown === false) {
+	                        		if (movementMode == "rail") {
+		                        		movementMode = "swim";
+		                        	} else {
+		                        		movementMode = "rail";
+		                        	}
+		                        	keyPressIsOnCooldown = true;
+		                        	setTimeout(function() {
+		                        		keyPressIsOnCooldown = false;
+		                        	}, 500);
+	                        	}
+	                        }
+                        	// Arrow keys to rotate
+			                if (device.getInput(37) === 1) {
+			                    camera.rotation.y -= 0.01;
+			                }
+			                if (device.getInput(39) === 1) {
+			                    camera.rotation.y += 0.01;
+			                }
+			                if (device.getInput(38) === 1) {
+			                    camera.rotation.x -= 0.01;
+			                }
+			                if (device.getInput(40) === 1) {
+			                    camera.rotation.x += 0.01;
+			                }
+                        }
+
+		                if (isMoving) {
+		                    //camera.getViewMatrix().invertToRef(transformMatrix);
+		                    if (movementMode == "rail") {
+		                    	camera.position.addInPlace(moveDirection);
+		                    } else if(movementMode == "swim") {
+		                    	camera.getViewMatrix().invertToRef(transformMatrix);
+			                    BABYLON.Vector3.TransformNormalToRef(localDirection, transformMatrix, transformedDirection);
+			                    camera.position.addInPlace(transformedDirection);
+		                    }
+		                }
+		            });
+		        }
+		    });
+
+		    return dsm;
+		};
+
+        var createScene = function() {
+            var scene = new BABYLON.Scene(engine);
+            // Add a camera to the scene and attach it to the canvas
+            var camera = new BABYLON.FreeCamera("camera", new BABYLON.Vector3(0, 5, 0), scene);
+            camera.rotation.x = Math.PI / 2;
+            //camera.attachControl(canvas, true);
+            global_scene = scene;
+            global_camera = camera;
+
+            // Add a lights to the scene
+            var light = new BABYLON.HemisphericLight("light", new BABYLON.Vector3(0, 1, 0));
+            //Your Code
+            nodeMat = new BABYLON.StandardMaterial("nodeMat");
+            nodeMat.diffuseColor = new BABYLON.Color3(0, 1, 0);
+            selectedNodeMat = new BABYLON.StandardMaterial("nodeMat");
+            selectedNodeMat.diffuseColor = new BABYLON.Color3(1, 0.58, 0);
+
+            /* var box = BABYLON.MeshBuilder.CreateBox("box", {});
+            box.position.y = 0.5;
+            box.scaling.x = 2;
+            box.rotation.y = Math.PI / 4;
+            var sphere = BABYLON.MeshBuilder.CreateSphere("sphere", {});
+            sphere.position.y = -0.5;
+            var roof = BABYLON.MeshBuilder.CreateCylinder("roof", {diameter: 1.3, height: 1.2, tessellation: 5}); // tessellation is number of sides - make it a big number for a true cylinder or 3 for a triangluar prism
+            roof.scaling.x = 0.75;
+            roof.rotation.z = Math.PI / 2;
+            roof.position.y = 1.22;
+            var groundMat = new BABYLON.StandardMaterial("groundMat");
+            groundMat.diffuseColor = new BABYLON.Color3(0, 1, 0);
+            sphere.material = groundMat; //Place the material property of the ground
+            var roofMat = new BABYLON.StandardMaterial("roofMat");
+            roofMat.diffuseTexture = new BABYLON.Texture("https://assets.babylonjs.com/environments/roof.jpg", scene);
+            roof.material = roofMat; */
+
+            scene.onPointerObservable.add((pointerInfo) => {            
+			    switch (pointerInfo.type) {
+			        case BABYLON.PointerEventTypes.POINTERDOWN:
+			            if(pointerInfo.pickInfo.hit) {
+			                pointerDown(pointerInfo.pickInfo.pickedMesh)
+			            }
+			        break;
+			    }
+			});
+
+            var dsm = initializeInput(scene, camera);
+            return scene;
+        };
+
+        const canvas = document.getElementById("renderCanvas"); // Get the canvas element
+        const engine = new BABYLON.Engine(canvas, true); // Generate the BABYLON 3D engine
+        // Add your code here matching the playground format
+        const scene = createScene(); //Call the createScene function
+        // Register a render loop to repeatedly render the scene
+        engine.runRenderLoop(function () {
+                scene.render();
+        });
+        // Watch for browser/canvas resize events
+        window.addEventListener("resize", function () {
+                engine.resize();
+        });
+    </script>
+   </body>
+</html>
